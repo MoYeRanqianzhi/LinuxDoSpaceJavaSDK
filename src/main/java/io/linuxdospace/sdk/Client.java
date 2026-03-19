@@ -47,6 +47,7 @@ public final class Client implements AutoCloseable {
 
     private volatile LinuxDoSpaceException initialError;
     private volatile LinuxDoSpaceException fatalError;
+    private volatile InputStream activeStream;
     private final Thread readerThread;
 
     public Client(String token) {
@@ -157,6 +158,15 @@ public final class Client implements AutoCloseable {
             return;
         }
         connected.set(false);
+        InputStream liveStream = activeStream;
+        activeStream = null;
+        if (liveStream != null) {
+            try {
+                liveStream.close();
+            } catch (Exception ignored) {
+                // Best effort shutdown to unblock readLine().
+            }
+        }
         for (ClientSubscription listener : fullListeners) {
             listener.pushCloseSignal();
         }
@@ -251,9 +261,11 @@ public final class Client implements AutoCloseable {
 
             connected.set(true);
             initialReady.countDown();
-            try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(response.body(), StandardCharsets.UTF_8)
-            )) {
+            try (InputStream stream = response.body();
+                 BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(stream, StandardCharsets.UTF_8)
+                 )) {
+                activeStream = stream;
                 String line;
                 while (!closed.get() && (line = reader.readLine()) != null) {
                     if (line.isBlank()) {
@@ -261,6 +273,8 @@ public final class Client implements AutoCloseable {
                     }
                     handleEventLine(line);
                 }
+            } finally {
+                activeStream = null;
             }
         } catch (AuthenticationException authenticationException) {
             throw authenticationException;

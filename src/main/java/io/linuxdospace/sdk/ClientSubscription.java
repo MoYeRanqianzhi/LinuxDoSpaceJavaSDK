@@ -16,11 +16,13 @@ public final class ClientSubscription implements AutoCloseable {
     private final BlockingQueue<Object> queue;
     private final Runnable unregister;
     private final AtomicBoolean closed;
+    private final AtomicBoolean active;
 
     ClientSubscription(Runnable unregister) {
         this.queue = new LinkedBlockingQueue<>();
         this.unregister = unregister;
         this.closed = new AtomicBoolean(false);
+        this.active = new AtomicBoolean(false);
     }
 
     BlockingQueue<Object> queue() {
@@ -33,6 +35,9 @@ public final class ClientSubscription implements AutoCloseable {
         }
         if (timeout == null || timeout.isNegative()) {
             throw new IllegalArgumentException("timeout must be zero or positive");
+        }
+        if (!active.compareAndSet(false, true)) {
+            throw new LinuxDoSpaceException("subscription already has an active consumer");
         }
         try {
             Object item = timeout.isZero()
@@ -52,6 +57,8 @@ public final class ClientSubscription implements AutoCloseable {
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
             return Optional.empty();
+        } finally {
+            active.set(false);
         }
     }
 

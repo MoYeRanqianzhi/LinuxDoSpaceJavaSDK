@@ -84,7 +84,9 @@ public final class MailBox implements AutoCloseable {
         if (timeout == null || timeout.isNegative()) {
             throw new IllegalArgumentException("timeout must be zero or positive");
         }
-        active.set(true);
+        if (!active.compareAndSet(false, true)) {
+            throw new LinuxDoSpaceException("mailbox already has an active listener");
+        }
         try {
             Object item = timeout.isZero()
                 ? queue.poll()
@@ -103,6 +105,8 @@ public final class MailBox implements AutoCloseable {
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
             return Optional.empty();
+        } finally {
+            active.set(false);
         }
     }
 
