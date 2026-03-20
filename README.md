@@ -9,6 +9,11 @@ This SDK implements the LinuxDoSpace token mail stream protocol:
 - `allowOverlap=true` continues matching later bindings
 - mailbox queues become active only when listening starts (no pre-listen backlog)
 
+Important:
+
+- `Suffix.LINUXDO_SPACE` is semantic, not literal
+- the SDK resolves it to `<owner_username>.linuxdo.space` after `ready.owner_username`
+
 ## Requirements
 
 - JDK 21+

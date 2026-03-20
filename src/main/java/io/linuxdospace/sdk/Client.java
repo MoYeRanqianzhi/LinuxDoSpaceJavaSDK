@@ -48,6 +48,7 @@ public final class Client implements AutoCloseable {
     private volatile LinuxDoSpaceException initialError;
     private volatile LinuxDoSpaceException fatalError;
     private volatile InputStream activeStream;
+    private volatile String ownerUsername;
     private final Thread readerThread;
 
     public Client(String token) {
@@ -98,6 +99,18 @@ public final class Client implements AutoCloseable {
     /**
      * bindExact registers one exact local mailbox binding.
      */
+    public MailBox bindExact(String prefix, String suffix, boolean allowOverlap) {
+        if (prefix == null || prefix.isBlank()) {
+            throw new IllegalArgumentException("prefix must not be empty");
+        }
+        ensureUsable();
+        String normalizedPrefix = prefix.strip().toLowerCase(Locale.ROOT);
+        return registerBinding("exact", normalizeLiteralSuffix(suffix), normalizedPrefix, null, allowOverlap);
+    }
+
+    /**
+     * bindExact registers one exact local mailbox binding using semantic suffix constants.
+     */
     public MailBox bindExact(String prefix, Suffix suffix, boolean allowOverlap) {
         if (prefix == null || prefix.isBlank()) {
             throw new IllegalArgumentException("prefix must not be empty");
@@ -107,11 +120,23 @@ public final class Client implements AutoCloseable {
         }
         ensureUsable();
         String normalizedPrefix = prefix.strip().toLowerCase(Locale.ROOT);
-        return registerBinding("exact", suffix.value(), normalizedPrefix, null, allowOverlap);
+        return registerBinding("exact", resolveBindingSuffix(suffix), normalizedPrefix, null, allowOverlap);
     }
 
     /**
      * bindPattern registers one regex local mailbox binding.
+     */
+    public MailBox bindPattern(String pattern, String suffix, boolean allowOverlap) {
+        if (pattern == null || pattern.isBlank()) {
+            throw new IllegalArgumentException("pattern must not be empty");
+        }
+        ensureUsable();
+        Pattern compiled = Pattern.compile(pattern.strip());
+        return registerBinding("pattern", normalizeLiteralSuffix(suffix), null, compiled, allowOverlap);
+    }
+
+    /**
+     * bindPattern registers one regex local mailbox binding using semantic suffix constants.
      */
     public MailBox bindPattern(String pattern, Suffix suffix, boolean allowOverlap) {
         if (pattern == null || pattern.isBlank()) {
@@ -122,7 +147,7 @@ public final class Client implements AutoCloseable {
         }
         ensureUsable();
         Pattern compiled = Pattern.compile(pattern.strip());
-        return registerBinding("pattern", suffix.value(), null, compiled, allowOverlap);
+        return registerBinding("pattern", resolveBindingSuffix(suffix), null, compiled, allowOverlap);
     }
 
     /**
@@ -262,7 +287,6 @@ public final class Client implements AutoCloseable {
             }
 
             connected.set(true);
-            initialReady.countDown();
             try (InputStream stream = response.body();
                  BufferedReader reader = new BufferedReader(
                     new InputStreamReader(stream, StandardCharsets.UTF_8)
@@ -274,6 +298,9 @@ public final class Client implements AutoCloseable {
                         continue;
                     }
                     handleEventLine(line);
+                }
+                if (!closed.get() && initialReady.getCount() > 0) {
+                    throw new StreamException("mail stream ended before ready event");
                 }
             } finally {
                 activeStream = null;
@@ -291,7 +318,11 @@ public final class Client implements AutoCloseable {
         try {
             Map<String, Object> root = parseFlatJson(line);
             String type = stringValue(root.get("type"));
-            if (Set.of("ready", "heartbeat").contains(type)) {
+            if ("ready".equals(type)) {
+                handleReadyEvent(root);
+                return;
+            }
+            if ("heartbeat".equals(type)) {
                 return;
             }
             if (!"mail".equals(type)) {
@@ -476,6 +507,33 @@ public final class Client implements AutoCloseable {
                 .add(new Binding(mailBox));
         }
         return mailBox;
+    }
+
+    private void handleReadyEvent(Map<String, Object> root) {
+        String normalizedOwnerUsername = stringValue(root.get("owner_username")).strip().toLowerCase(Locale.ROOT);
+        if (normalizedOwnerUsername.isEmpty()) {
+            throw new StreamException("ready event did not include owner_username");
+        }
+        ownerUsername = normalizedOwnerUsername;
+        initialReady.countDown();
+    }
+
+    private String resolveBindingSuffix(Suffix suffix) {
+        if (suffix != Suffix.LINUXDO_SPACE) {
+            return normalizeLiteralSuffix(suffix.value());
+        }
+        String normalizedOwnerUsername = ownerUsername == null ? "" : ownerUsername.strip().toLowerCase(Locale.ROOT);
+        if (normalizedOwnerUsername.isEmpty()) {
+            throw new StreamException("stream bootstrap did not provide owner_username required to resolve Suffix.LINUXDO_SPACE");
+        }
+        return normalizedOwnerUsername + "." + Suffix.LINUXDO_SPACE.value();
+    }
+
+    private String normalizeLiteralSuffix(String suffix) {
+        if (suffix == null || suffix.isBlank()) {
+            throw new IllegalArgumentException("suffix must not be empty");
+        }
+        return suffix.strip().toLowerCase(Locale.ROOT);
     }
 
     private void sleepQuietly(Duration duration) {
