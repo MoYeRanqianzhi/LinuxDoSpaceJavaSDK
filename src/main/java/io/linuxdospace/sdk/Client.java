@@ -87,7 +87,7 @@ public final class Client implements AutoCloseable {
      * listen registers one full-stream queue.
      */
     public ClientSubscription listen() {
-        checkFatalError();
+        ensureUsable();
         final ClientSubscription[] holder = new ClientSubscription[1];
         ClientSubscription subscription = new ClientSubscription(() -> fullListeners.remove(holder[0]));
         holder[0] = subscription;
@@ -105,7 +105,7 @@ public final class Client implements AutoCloseable {
         if (suffix == null) {
             throw new IllegalArgumentException("suffix must not be null");
         }
-        checkFatalError();
+        ensureUsable();
         String normalizedPrefix = prefix.strip().toLowerCase(Locale.ROOT);
         return registerBinding("exact", suffix.value(), normalizedPrefix, null, allowOverlap);
     }
@@ -120,7 +120,7 @@ public final class Client implements AutoCloseable {
         if (suffix == null) {
             throw new IllegalArgumentException("suffix must not be null");
         }
-        checkFatalError();
+        ensureUsable();
         Pattern compiled = Pattern.compile(pattern.strip());
         return registerBinding("pattern", suffix.value(), null, compiled, allowOverlap);
     }
@@ -129,6 +129,7 @@ public final class Client implements AutoCloseable {
      * route returns current local matched mailboxes for one message address.
      */
     public List<MailBox> route(MailMessage message) {
+        ensureUsable();
         if (message == null || message.address() == null || message.address().isBlank()) {
             return List.of();
         }
@@ -167,6 +168,7 @@ public final class Client implements AutoCloseable {
                 // Best effort shutdown to unblock readLine().
             }
         }
+        readerThread.interrupt();
         for (ClientSubscription listener : fullListeners) {
             listener.pushCloseSignal();
         }
@@ -487,7 +489,10 @@ public final class Client implements AutoCloseable {
         }
     }
 
-    private void checkFatalError() {
+    private void ensureUsable() {
+        if (closed.get()) {
+            throw new LinuxDoSpaceException("client is already closed");
+        }
         if (fatalError != null) {
             throw fatalError;
         }

@@ -17,14 +17,12 @@ This SDK implements the LinuxDoSpace token mail stream protocol:
 ## Build
 
 ```bash
-cd sdk/java
 mvn -q -DskipTests compile
 ```
 
 If Maven is not available in your environment, compile directly with `javac`:
 
 ```bash
-cd sdk/java
 javac --release 21 -d out src/main/java/io/linuxdospace/sdk/*.java
 ```
 
