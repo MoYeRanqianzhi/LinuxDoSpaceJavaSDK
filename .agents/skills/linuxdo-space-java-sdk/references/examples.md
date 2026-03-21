@@ -19,4 +19,3 @@ var subscription = client.listen();
 MailMessage item = subscription.next(Duration.ofSeconds(30)).orElse(null);
 subscription.close();
 ```
-

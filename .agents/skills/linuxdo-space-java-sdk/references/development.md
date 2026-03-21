@@ -39,4 +39,3 @@ javac --release 21 -d out src/main/java/io/linuxdospace/sdk/*.java
 - `../../../README.md`
 - `../../../.github/workflows/ci.yml`
 - `../../../.github/workflows/release.yml`
-

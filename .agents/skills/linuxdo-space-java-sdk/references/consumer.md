@@ -39,4 +39,3 @@ try (Client client = new Client("lds_pat...")) {
 - `Client.listen()` and `MailBox.next(Duration)` are different consumption models.
 - Mailbox delivery is active only while a mailbox `next(...)` call is waiting.
 - `route(message)` is local matching only.
-

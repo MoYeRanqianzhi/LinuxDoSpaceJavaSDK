@@ -32,4 +32,3 @@ Read [references/development.md](references/development.md) only when editing `s
 - Do not document a public Maven Central install path; current release output is GitHub Release jars.
 - Do not describe mailbox queues as continuously buffering between `next(...)` calls.
 - Do not add hidden pre-listen mailbox buffering.
-
