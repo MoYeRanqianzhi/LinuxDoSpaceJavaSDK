@@ -1,0 +1,4 @@
+interface:
+  display_name: "LinuxDoSpace Java SDK"
+  short_description: "Use or maintain the LinuxDoSpace Java SDK"
+  default_prompt: "Use $linuxdo-space-java-sdk when writing consumer code against sdk/java or when updating the LinuxDoSpace Java SDK with matching docs and validation guidance."
