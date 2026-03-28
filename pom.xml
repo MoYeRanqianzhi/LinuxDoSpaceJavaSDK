@@ -6,7 +6,7 @@
 
     <groupId>io.linuxdospace</groupId>
     <artifactId>linuxdospace-sdk-java</artifactId>
-    <version>0.1.0-alpha.1</version>
+    <version>0.1.0-alpha.2</version>
     <name>LinuxDoSpace Java SDK</name>
     <description>Java SDK for LinuxDoSpace HTTPS NDJSON mail stream</description>
 
