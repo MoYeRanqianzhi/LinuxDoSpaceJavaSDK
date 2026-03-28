@@ -10,6 +10,12 @@ import java.util.regex.Pattern;
 
 /**
  * MailBox is one local mailbox binding over the shared client stream.
+ *
+ * <p>The concrete {@code suffix} value already reflects the owner-specific
+ * namespace chosen by the client, for example
+ * {@code <owner>-mail.linuxdo.space} or one dynamic
+ * {@code <owner>-mailfoo.linuxdo.space} variant derived from a semantic
+ * suffix input.</p>
  */
 public final class MailBox implements AutoCloseable {
     static final Object CLOSE_SENTINEL = new Object();
@@ -136,6 +142,8 @@ public final class MailBox implements AutoCloseable {
     public void close() {
         if (closed.compareAndSet(false, true)) {
             unregister.run();
+            active.set(false);
+            queue.clear();
             queue.offer(CLOSE_SENTINEL);
         }
     }

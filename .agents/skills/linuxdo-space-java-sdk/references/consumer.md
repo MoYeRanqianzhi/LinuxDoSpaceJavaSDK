@@ -29,7 +29,9 @@ try (Client client = new Client("lds_pat...")) {
 ```java
 try (Client client = new Client("lds_pat...")) {
     MailBox alice = client.bindExact("alice", Suffix.LINUXDO_SPACE, false);
+    MailBox alerts = client.bindExact("alerts", Suffix.LINUXDO_SPACE.withSuffix("foo"), false);
     MailMessage item = alice.next(Duration.ofSeconds(30)).orElse(null);
+    alerts.close();
     alice.close();
 }
 ```
@@ -39,3 +41,6 @@ try (Client client = new Client("lds_pat...")) {
 - `Client.listen()` and `MailBox.next(Duration)` are different consumption models.
 - Mailbox delivery is active only while a mailbox `next(...)` call is waiting.
 - `route(message)` is local matching only.
+- `Suffix.LINUXDO_SPACE` defaults to `<owner_username>-mail.linuxdo.space`.
+- `Suffix.LINUXDO_SPACE.withSuffix("foo")` derives `<owner_username>-mailfoo.linuxdo.space`.
+- The SDK synchronizes active semantic `-mail<suffix>` fragments to `/v1/token/email/filters`.

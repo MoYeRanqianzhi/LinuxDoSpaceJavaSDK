@@ -9,7 +9,7 @@
 
 ## Public surface
 
-- Types: `Client`, `ClientOptions`, `ClientSubscription`, `MailBox`, `MailMessage`, `Suffix`, `LinuxDoSpaceException`, `AuthenticationException`, `StreamException`
+- Types: `Client`, `ClientOptions`, `ClientSubscription`, `MailBox`, `MailMessage`, `Suffix`, `SemanticSuffix`, `LinuxDoSpaceException`, `AuthenticationException`, `StreamException`
 - Client:
   - constructors `Client(...)`
   - `listen()`
@@ -25,10 +25,20 @@
   - `next(Duration)`
   - `close()`
   - metadata accessors such as `mode()`, `suffix()`, `pattern()`, `address()`
+- Suffix:
+  - `value()`
+  - `withSuffix(...)`
+- SemanticSuffix:
+  - `base()`
+  - `mailSuffixFragment()`
+  - `withSuffix(...)`
 
 ## Semantics
 
 - `Suffix.LINUXDO_SPACE` is semantic, not literal.
+- `Suffix.LINUXDO_SPACE` resolves to `<owner_username>-mail.linuxdo.space`.
+- `Suffix.LINUXDO_SPACE.withSuffix("foo")` resolves to `<owner_username>-mailfoo.linuxdo.space`.
+- Active semantic `-mail<suffix>` registrations synchronize to `PUT /v1/token/email/filters`.
 - Regex bindings share the same ordered chain as exact bindings.
 - Full-stream messages use the first recipient projection address.
 - Mailbox messages use matched-recipient projection addresses.

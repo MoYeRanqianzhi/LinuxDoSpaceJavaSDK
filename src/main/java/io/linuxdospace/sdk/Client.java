@@ -29,10 +29,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
- * Client owns one upstream NDJSON stream and routes events to local listeners.
+ * Client owns one upstream NDJSON stream, routes events to local listeners,
+ * and keeps the backend-side dynamic {@code -mail<suffix>} filter list aligned
+ * with the semantic mailbox bindings currently registered in this process.
  */
 public final class Client implements AutoCloseable {
     private static final String STREAM_PATH = "/v1/token/email/stream";
+    private static final String STREAM_FILTERS_PATH = "/v1/token/email/filters";
 
     private final String token;
     private final ClientOptions options;
@@ -41,6 +44,7 @@ public final class Client implements AutoCloseable {
     private final AtomicBoolean connected;
 
     private final Object lock;
+    private final Object filterSyncLock;
     private final List<ClientSubscription> fullListeners;
     private final Map<String, List<Binding>> bindingsBySuffix;
     private final CountDownLatch initialReady;
@@ -49,6 +53,7 @@ public final class Client implements AutoCloseable {
     private volatile LinuxDoSpaceException fatalError;
     private volatile InputStream activeStream;
     private volatile String ownerUsername;
+    private volatile List<String> syncedMailboxSuffixFragments;
     private final Thread readerThread;
 
     public Client(String token) {
@@ -70,9 +75,11 @@ public final class Client implements AutoCloseable {
         this.closed = new AtomicBoolean(false);
         this.connected = new AtomicBoolean(false);
         this.lock = new Object();
+        this.filterSyncLock = new Object();
         this.fullListeners = new CopyOnWriteArrayList<>();
         this.bindingsBySuffix = new LinkedHashMap<>();
         this.initialReady = new CountDownLatch(1);
+        this.syncedMailboxSuffixFragments = null;
         this.readerThread = new Thread(this::runLoop, "LinuxDoSpaceJavaClient");
         this.readerThread.setDaemon(true);
         this.readerThread.start();
@@ -109,9 +116,27 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * bindExact registers one exact local mailbox binding using semantic suffix constants.
+     * bindExact registers one exact local mailbox binding using semantic suffix
+     * constants such as {@link Suffix#LINUXDO_SPACE}, whose current canonical
+     * concrete suffix is {@code <owner_username>-mail.linuxdo.space}.
      */
     public MailBox bindExact(String prefix, Suffix suffix, boolean allowOverlap) {
+        if (prefix == null || prefix.isBlank()) {
+            throw new IllegalArgumentException("prefix must not be empty");
+        }
+        if (suffix == null) {
+            throw new IllegalArgumentException("suffix must not be null");
+        }
+        ensureUsable();
+        String normalizedPrefix = prefix.strip().toLowerCase(Locale.ROOT);
+        return registerBinding("exact", resolveBindingSuffix(suffix), normalizedPrefix, null, allowOverlap);
+    }
+
+    /**
+     * bindExact registers one exact local mailbox binding using one semantic
+     * suffix plus one optional dynamic {@code -mail<suffix>} fragment.
+     */
+    public MailBox bindExact(String prefix, SemanticSuffix suffix, boolean allowOverlap) {
         if (prefix == null || prefix.isBlank()) {
             throw new IllegalArgumentException("prefix must not be empty");
         }
@@ -136,9 +161,27 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * bindPattern registers one regex local mailbox binding using semantic suffix constants.
+     * bindPattern registers one regex local mailbox binding using semantic
+     * suffix constants such as {@link Suffix#LINUXDO_SPACE}, whose current
+     * canonical concrete suffix is {@code <owner_username>-mail.linuxdo.space}.
      */
     public MailBox bindPattern(String pattern, Suffix suffix, boolean allowOverlap) {
+        if (pattern == null || pattern.isBlank()) {
+            throw new IllegalArgumentException("pattern must not be empty");
+        }
+        if (suffix == null) {
+            throw new IllegalArgumentException("suffix must not be null");
+        }
+        ensureUsable();
+        Pattern compiled = Pattern.compile(pattern.strip());
+        return registerBinding("pattern", resolveBindingSuffix(suffix), null, compiled, allowOverlap);
+    }
+
+    /**
+     * bindPattern registers one regex local mailbox binding using one semantic
+     * suffix plus one optional dynamic {@code -mail<suffix>} fragment.
+     */
+    public MailBox bindPattern(String pattern, SemanticSuffix suffix, boolean allowOverlap) {
         if (pattern == null || pattern.isBlank()) {
             throw new IllegalArgumentException("pattern must not be empty");
         }
@@ -158,13 +201,13 @@ public final class Client implements AutoCloseable {
         if (message == null || message.address() == null || message.address().isBlank()) {
             return List.of();
         }
-        AddressParts addressParts = splitAddress(message.address().strip().toLowerCase(Locale.ROOT));
-        if (addressParts == null) {
-            return List.of();
-        }
         List<MailBox> matches = new ArrayList<>();
         synchronized (lock) {
-            List<Binding> chain = bindingsBySuffix.getOrDefault(addressParts.suffix(), List.of());
+            AddressParts addressParts = splitAddress(message.address().strip().toLowerCase(Locale.ROOT));
+            if (addressParts == null) {
+                return List.of();
+            }
+            List<Binding> chain = resolveBindingChain(addressParts);
             for (Binding binding : chain) {
                 if (!binding.mailBox().matches(addressParts.localPart())) {
                     continue;
@@ -184,6 +227,18 @@ public final class Client implements AutoCloseable {
             return;
         }
         connected.set(false);
+        List<ClientSubscription> listenerSnapshot = new ArrayList<>(fullListeners);
+        fullListeners.clear();
+        List<MailBox> mailboxSnapshot = new ArrayList<>();
+        synchronized (lock) {
+            for (List<Binding> chain : bindingsBySuffix.values()) {
+                for (Binding binding : chain) {
+                    mailboxSnapshot.add(binding.mailBox());
+                }
+            }
+            bindingsBySuffix.clear();
+        }
+        syncRemoteMailboxFilters(false);
         InputStream liveStream = activeStream;
         activeStream = null;
         if (liveStream != null) {
@@ -194,16 +249,11 @@ public final class Client implements AutoCloseable {
             }
         }
         readerThread.interrupt();
-        for (ClientSubscription listener : fullListeners) {
-            listener.pushCloseSignal();
+        for (ClientSubscription listener : listenerSnapshot) {
+            listener.close();
         }
-        synchronized (lock) {
-            for (List<Binding> chain : bindingsBySuffix.values()) {
-                for (Binding binding : chain) {
-                    binding.mailBox().enqueueControl(MailBox.CLOSE_SENTINEL);
-                }
-            }
-            bindingsBySuffix.clear();
+        for (MailBox mailBox : mailboxSnapshot) {
+            mailBox.close();
         }
         try {
             readerThread.join(options.connectTimeout().plusSeconds(1).toMillis());
@@ -443,12 +493,12 @@ public final class Client implements AutoCloseable {
     }
 
     private void dispatchToBindings(String address, MailMessage message) {
-        AddressParts parts = splitAddress(address);
-        if (parts == null) {
-            return;
-        }
         synchronized (lock) {
-            List<Binding> chain = bindingsBySuffix.getOrDefault(parts.suffix(), List.of());
+            AddressParts parts = splitAddress(address);
+            if (parts == null) {
+                return;
+            }
+            List<Binding> chain = resolveBindingChain(parts);
             for (Binding binding : chain) {
                 if (!binding.mailBox().matches(parts.localPart())) {
                     continue;
@@ -459,6 +509,37 @@ public final class Client implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /**
+     * resolveBindingChain maps the actual recipient suffix back onto the
+     * caller's semantic suffix registration when necessary.
+     *
+     * This keeps live dispatch semantics identical to route(message):
+     * - explicit literal suffix bindings stay literal
+     * - semantic Suffix.LINUXDO_SPACE bindings are stored under the current
+     *   canonical `-mail` namespace
+     * - legacy `<owner>.linuxdo.space` recipients still fall back onto the
+     *   canonical semantic `-mail` binding chain when no literal binding exists
+     */
+    private List<Binding> resolveBindingChain(AddressParts addressParts) {
+        List<Binding> direct = bindingsBySuffix.get(addressParts.suffix());
+        if (direct != null && !direct.isEmpty()) {
+            return direct;
+        }
+
+        String normalizedOwnerUsername = ownerUsername == null ? "" : ownerUsername.strip().toLowerCase(Locale.ROOT);
+        if (normalizedOwnerUsername.isEmpty()) {
+            return List.of();
+        }
+
+        String rootSuffix = Suffix.LINUXDO_SPACE.value();
+        String semanticLegacySuffix = normalizedOwnerUsername + "." + rootSuffix;
+        String semanticMailSuffix = normalizedOwnerUsername + "-mail." + rootSuffix;
+        if (!addressParts.suffix().equals(semanticLegacySuffix)) {
+            return List.of();
+        }
+        return bindingsBySuffix.getOrDefault(semanticMailSuffix, List.of());
     }
 
     private void broadcastToFull(MailMessage message) {
@@ -499,12 +580,28 @@ public final class Client implements AutoCloseable {
                     bindingsBySuffix.remove(suffix);
                 }
             }
+            syncRemoteMailboxFilters(false);
         };
         MailBox mailBox = new MailBox(mode, suffix, prefix, pattern, allowOverlap, unregister);
         holder[0] = mailBox;
         synchronized (lock) {
             bindingsBySuffix.computeIfAbsent(suffix, ignored -> new ArrayList<>())
                 .add(new Binding(mailBox));
+        }
+        try {
+            syncRemoteMailboxFilters(true);
+        } catch (RuntimeException runtimeException) {
+            synchronized (lock) {
+                List<Binding> chain = bindingsBySuffix.get(suffix);
+                if (chain != null) {
+                    chain.removeIf(binding -> binding.mailBox() == mailBox);
+                    if (chain.isEmpty()) {
+                        bindingsBySuffix.remove(suffix);
+                    }
+                }
+            }
+            syncRemoteMailboxFilters(false);
+            throw runtimeException;
         }
         return mailBox;
     }
@@ -526,7 +623,22 @@ public final class Client implements AutoCloseable {
         if (normalizedOwnerUsername.isEmpty()) {
             throw new StreamException("stream bootstrap did not provide owner_username required to resolve Suffix.LINUXDO_SPACE");
         }
-        return normalizedOwnerUsername + "." + Suffix.LINUXDO_SPACE.value();
+        return normalizedOwnerUsername + "-mail." + Suffix.LINUXDO_SPACE.value();
+    }
+
+    private String resolveBindingSuffix(SemanticSuffix suffix) {
+        if (suffix.base() != Suffix.LINUXDO_SPACE) {
+            return normalizeLiteralSuffix(suffix.base().value());
+        }
+        String normalizedOwnerUsername = ownerUsername == null ? "" : ownerUsername.strip().toLowerCase(Locale.ROOT);
+        if (normalizedOwnerUsername.isEmpty()) {
+            throw new StreamException("stream bootstrap did not provide owner_username required to resolve semantic Suffix.LINUXDO_SPACE");
+        }
+        return normalizedOwnerUsername
+            + "-mail"
+            + suffix.mailSuffixFragment()
+            + "."
+            + suffix.base().value();
     }
 
     private String normalizeLiteralSuffix(String suffix) {
@@ -534,6 +646,99 @@ public final class Client implements AutoCloseable {
             throw new IllegalArgumentException("suffix must not be empty");
         }
         return suffix.strip().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * syncRemoteMailboxFilters keeps the backend-side dynamic mail suffix
+     * filter list aligned with the owner-specific mailbox suffixes currently
+     * registered in this client process.
+     */
+    private void syncRemoteMailboxFilters(boolean strict) {
+        synchronized (filterSyncLock) {
+            String normalizedOwnerUsername = ownerUsername == null ? "" : ownerUsername.strip().toLowerCase(Locale.ROOT);
+            if (normalizedOwnerUsername.isEmpty()) {
+                return;
+            }
+
+            List<String> fragments = collectRemoteMailboxSuffixFragments(normalizedOwnerUsername);
+            if (fragments.isEmpty() && syncedMailboxSuffixFragments == null) {
+                return;
+            }
+            if (fragments.equals(syncedMailboxSuffixFragments)) {
+                return;
+            }
+
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(options.baseUrl() + STREAM_FILTERS_PATH))
+                .timeout(options.connectTimeout())
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + token)
+                .PUT(HttpRequest.BodyPublishers.ofString(buildFiltersPayload(fragments), StandardCharsets.UTF_8))
+                .build();
+
+            try {
+                HttpResponse<String> response = httpClient.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+                );
+                if (response.statusCode() != 200) {
+                    throw new StreamException(
+                        "unexpected mailbox filter sync status code: "
+                            + response.statusCode()
+                            + (response.body().isBlank() ? "" : " body=" + response.body().strip())
+                    );
+                }
+                syncedMailboxSuffixFragments = fragments;
+            } catch (LinuxDoSpaceException sdkError) {
+                if (strict) {
+                    throw sdkError;
+                }
+            } catch (Exception exception) {
+                if (strict) {
+                    throw new StreamException("failed to synchronize remote mailbox filters", exception);
+                }
+            }
+        }
+    }
+
+    private List<String> collectRemoteMailboxSuffixFragments(String normalizedOwnerUsername) {
+        List<String> suffixSnapshot;
+        synchronized (lock) {
+            suffixSnapshot = new ArrayList<>(bindingsBySuffix.keySet());
+        }
+
+        String canonicalPrefix = normalizedOwnerUsername + "-mail";
+        String rootSuffix = Suffix.LINUXDO_SPACE.value();
+        Set<String> fragments = new java.util.TreeSet<>();
+        for (String suffix : suffixSnapshot) {
+            String normalizedSuffix = suffix.strip().toLowerCase(Locale.ROOT);
+            String rootMarker = "." + rootSuffix;
+            if (!normalizedSuffix.endsWith(rootMarker)) {
+                continue;
+            }
+            String label = normalizedSuffix.substring(0, normalizedSuffix.length() - rootMarker.length());
+            if (label.contains(".") || !label.startsWith(canonicalPrefix)) {
+                continue;
+            }
+            fragments.add(label.substring(canonicalPrefix.length()));
+        }
+        return List.copyOf(fragments);
+    }
+
+    private String buildFiltersPayload(List<String> fragments) {
+        StringBuilder payload = new StringBuilder();
+        payload.append("{\"suffixes\":[");
+        for (int index = 0; index < fragments.size(); index++) {
+            if (index > 0) {
+                payload.append(',');
+            }
+            payload.append('"');
+            payload.append(fragments.get(index));
+            payload.append('"');
+        }
+        payload.append("]}");
+        return payload.toString();
     }
 
     private void sleepQuietly(Duration duration) {

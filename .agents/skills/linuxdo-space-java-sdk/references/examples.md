@@ -6,6 +6,12 @@
 MailBox alice = client.bindExact("alice", Suffix.LINUXDO_SPACE, false);
 ```
 
+## Create one dynamic semantic mailbox
+
+```java
+MailBox alerts = client.bindExact("alerts", Suffix.LINUXDO_SPACE.withSuffix("foo"), false);
+```
+
 ## Create one catch-all
 
 ```java

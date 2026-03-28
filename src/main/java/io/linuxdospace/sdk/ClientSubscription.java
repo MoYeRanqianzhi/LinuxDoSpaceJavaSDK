@@ -70,6 +70,8 @@ public final class ClientSubscription implements AutoCloseable {
     public void close() {
         if (closed.compareAndSet(false, true)) {
             unregister.run();
+            active.set(false);
+            queue.clear();
             queue.offer(CLOSE_SENTINEL);
         }
     }
